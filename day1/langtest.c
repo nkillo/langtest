@@ -1,3 +1,12 @@
+/*
+    DAY 1
+    https://www.youtube.com/watch?v=6uhwyq2Ndt4
+    
+    Started from scratch and wrote a simple text parser (with bugs)
+    Wrote a very broken evaluation loop
+    in Day 2 we demonstrate how to take it further
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
 
