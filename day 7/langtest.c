@@ -1,13 +1,11 @@
 /*
-    DAY 6 - 1/14/26
-    https://www.youtube.com/watch?v=YFdhkGfBK5o
-    Added a minimal virtual machine
-    Only handles brittle loading of immediate values into registers, and adding registers
+    DAY 7 - 1/15/26
 
-    All the tokens across both languages are in a single enum
-    Separate assembly-like language parser function
-    brittle/broken opcode emission
-    Simple vm runtime loop
+    https://www.youtube.com/watch?v=EGpy1Zrht8o
+    
+    Added integer values to reg/octothorpe tokens for VM parsing
+    Added operand types for VM operator bytecode emission
+    Need to reduce complexity, collapse MOVs into LOAD/STOREs
 
 */
 
@@ -19,6 +17,7 @@
 #define BRED        "\033[1;31m"
 #define RESET       "\033[0m"
 
+//brittle defines, longs on linux might be u64
 #define u32 unsigned long int
 #define s32 long int
 #define i32 long int
@@ -123,6 +122,8 @@ typedef enum{
     tok_JNE ,
     tok_INC,
     tok_DEC,
+    tok_PUSH,
+    tok_POP,
 }token_type;
 
 typedef struct token{
@@ -306,6 +307,7 @@ typedef struct VM{
     u32 stackPointer; //points to the top of the stack
     
     u8 mem[MAX_VM_MEM];
+    u8 memUsed;
 
     //unused, if you want floating point operations you would need more instructions
     float fregisters[MAX_REGISTERS]; 
@@ -313,6 +315,11 @@ typedef struct VM{
 
 }VM;
 
+void resetVM(VM* vm){
+    memset(vm, 0, sizeof(VM));
+    vm->stackPointer = (MAX_VM_MEM) - 4;
+    vm->framePointer = vm->stackPointer;
+}
 
 #define HASH_BUCKETS 4
 #define HASH_TABLE_SIZE 2048
@@ -458,6 +465,8 @@ const char* tokStr(token_type t){
         case tok_DEC :{return "tok_DEC";}break;
         case tok_REG :{return "tok_REG";}break;
         case tok_octothorpe:{return "tok_octothorpe";}break;
+        case tok_PUSH:{return "tok_PUSH";}break;
+        case tok_POP:{return "tok_POP";}break;
         default:{}return "";
     }
     return "TEST";
@@ -488,6 +497,15 @@ void printErrorLine(int line){
     }
     tempVMLine[i] = 0;
     printf("ERROR LINE %3d : %s%s%s\n", line, BRED, tempErrorLine, RESET);
+}
+
+void vmTokenError(token t, const char* str){
+    printVMLine(t.line);
+    if(!str){
+        printf("TOKEN ERROR: %s\n", tokStr(t.type));
+    }else{
+        printf("TOKEN ERROR: %s | %s\n", tokStr(t.type), str);
+    }
 }
 
 
@@ -1293,21 +1311,6 @@ void emitBytesForLoop(stmt* s, int scope){
         printf("BACK PATCH %d AT SLOT %d\n", (byteCodeCount)*4, backpcount);
         backps[backpcount++] = (byteCodeCount)*4;
 
-    
-        // switch(e->data.binary.operator.type){
-            // case tok_plus:{
-                // LOAD ONTO REGISTER LOCALY
-                // printf("ADD $%d $%d\n", firstRegisterPos, secondRegisterPos);
-                // byteStrCount += sprintf(byteStr + byteStrCount, "%-9s$%-10d $%-8d  ;%-3d\\n\\\n","ADD", firstRegisterPos, secondRegisterPos, (byteCodeCount++)*4);
-                // TODO: constant folding if all expressions are literals/primaries
-            // }break;
-            // case tok_less:{
-            // }break;
-            // default:{
-                // Assert("UNHANDLED TOKEN TYPE IN EmitBytesBinary" && 0);
-            // }break;
-        // }
-
     }
 
 
@@ -1653,6 +1656,10 @@ token_type isVMKeyword(char* str){
             else if (keywordMatch((str + 1), "ne", 2))type = tok_JNE;
         }break;
         case 'i':{if(keywordMatch((str + 1), "nc", 2))type = tok_INC;}break;
+        case 'p':{
+                 if(keywordMatch((str + 1), "op", 2))type = tok_POP;
+            else if(keywordMatch((str + 1), "ush", 3))type = tok_PUSH;
+        }break;
 
         default:{}break;
     }
@@ -1937,8 +1944,10 @@ void printTokens(token* tokens, int tokenCount){
             case tok_JNE        :{printf("tok_JNE        %3d\n", i);}break;
             case tok_INC        :{printf("tok_INC        %3d\n", i);}break;
             case tok_DEC        :{printf("tok_DEC        %3d\n", i);}break;
-            case tok_REG        :{printf("tok_REG        %3d\n", i);}break;
-            case tok_octothorpe:{printf("tok_octothorpe %3d\n", i);}break;
+            case tok_REG        :{printf("tok_REG        %3d | %d\n", i, t.data.integer);}break;
+            case tok_octothorpe :{printf("tok_octothorpe %3d | %d\n", i, t.data.integer);}break;
+            case tok_PUSH       :{printf("tok_PUSH       %3d\n", i);}break;
+            case tok_POP        :{printf("tok_POP        %3d\n", i);}break;
 
             default:{}break;
         }
@@ -2162,12 +2171,10 @@ void vmParser(char* input){
                     //adds the register token
                     token t = {};
                     t.type = tok_REG;
-                    vmAddToken(t);
-
+                    
                     //now extract the number
                     //extract number from register
                     c = input[++i];
-                    t.type = tok_num;
                     int val = 0;
                     while(isNum(c)){
                         val *= 10;
@@ -2200,14 +2207,28 @@ void vmParser(char* input){
                 case '$':{
                     token t = {};
                     t.type = tok_REG;
+                    c = input[++i];
+                    int val = 0;
+                    while(isNum(c)){
+                        val *= 10;
+                        val += c - '0';
+                        c = input[++i];
+                    }
+                    t.data.integer = val;
                     vmAddToken(t);
-                    i++;
                 }break;
                 case '#':{
                     token t = {};
                     t.type = tok_octothorpe;
+                    c = input[++i];
+                    int val = 0;
+                    while(isNum(c)){
+                        val *= 10;
+                        val += c - '0';
+                        c = input[++i];
+                    }
+                    t.data.integer = val;
                     vmAddToken(t);
-                    i++;
                 }break;
                 case '+':{
                     token t = {}; 
@@ -2330,20 +2351,53 @@ typedef enum {
     op_sub_reg_reg,
     op_mul_reg_reg,
     op_div_reg_reg,
-}op_type;
+
+    
+    //[#0] $0 addr_reg
+    //$0 [] reg_addr
+    op_mov_addreg_imm, //[$0] #0 
+    op_mov_addimm_imm, //[#0] #0
+    op_mov_addreg_reg, //[$0] $0
+    op_mov_addimm_reg, //[#0] $0
+    op_mov_reg_addreg, // $0 [$0]
+    op_mov_reg_addimm, // $0 [#0]
+}op_type; //operators
+
+const char* opStr(int op){
+    switch(op){
+        case op_none                :{return "op_none   ";}break;
+        case op_mov_reg_reg         :{return "op_mov_reg_reg";}break;
+        case op_mov_reg_imm         :{return "op_mov_reg_imm";}break;
+        case op_add_reg_reg         :{return "op_add_reg_reg";}break;
+        case op_add_reg_imm         :{return "op_add_reg_imm";}break;
+        case op_sub_reg_reg         :{return "op_sub_reg_reg";}break;
+        case op_mul_reg_reg         :{return "op_mul_reg_reg";}break;
+        case op_div_reg_reg         :{return "op_div_reg_reg";}break;
+        case op_mov_addreg_imm      :{return "op_mov_addreg_imm ";}break;
+        case op_mov_addimm_imm      :{return "op_mov_addimm_imm ";}break;
+        case op_mov_addreg_reg      :{return "op_mov_addreg_reg ";}break;
+        case op_mov_addimm_reg      :{return "op_mov_addimm_reg ";}break;
+        case op_mov_reg_addreg      :{return "op_mov_reg_addreg ";}break;
+        case op_mov_reg_addimm      :{return "op_mov_reg_addimm ";}break;
+        default:{return "";}break;
+    }
+    return "";
+}
 
 void runVM(){
     vm.ip = 0;
     while(vm.ip < vm.bytecodeCount){
+        printf("CURRENT INSTRUCTION %s%s%s\n", BRED, opStr(vm.bytecode[vm.ip]), RESET);
+        printVMLine((vm.ip / 4) + 1);
         switch(vm.bytecode[vm.ip]){
             case op_mov_reg_reg:{}break;
             case op_mov_reg_imm:{
                 u8 reg1 = vm.bytecode[vm.ip + 1];
                 
                 u16 imm = 0;
-                //TODO: BUG, 0xFF ERASES THE SHIFTED VALUE! REMOVE & 0xFF! 
-                imm += (vm.bytecode[vm.ip + 2] << 8) & 0xFF;
-                imm += (vm.bytecode[vm.ip + 3] << 0) & 0xFF;
+                //figure out little or big endian eventually
+                imm += (vm.bytecode[vm.ip + 2] << 0);
+                imm += (vm.bytecode[vm.ip + 3] << 8);
                 
                 vm.registers[reg1] = imm;
 
@@ -2357,118 +2411,302 @@ void runVM(){
             case op_sub_reg_reg:{}break;
             case op_mul_reg_reg:{}break;
             case op_div_reg_reg:{}break;
-            default:{}break;
+            case op_mov_addreg_imm:{
+                u8 reg1   = vm.bytecode[vm.ip + 1];
+                u8 offset = vm.bytecode[vm.ip + 2];
+                u8 imm    = vm.bytecode[vm.ip + 3];
+                u32 addr = vm.registers[reg1] + offset;
+                vm.mem[addr] = imm;
+                //TODO: expand to setting 4 bytes at a time for default MOV
+            }break;
+            case op_mov_addimm_imm:{
+                u8 imm1   = vm.bytecode[vm.ip + 1];
+                u8 offset = vm.bytecode[vm.ip + 2];
+                u8 imm2    = vm.bytecode[vm.ip + 3];
+                u32 addr = imm1 + offset;
+                vm.mem[addr] = imm2;
+            }break;
+            case op_mov_addreg_reg:{
+                u8 reg1   = vm.bytecode[vm.ip + 1];
+                u8 offset = vm.bytecode[vm.ip + 2];
+                u8 reg2    = vm.bytecode[vm.ip + 3];
+                u32 addr = vm.registers[reg1] + offset;
+                vm.mem[addr] = reg2;
+            }break;
+            case op_mov_addimm_reg:{
+                u8 imm   = vm.bytecode[vm.ip + 1];
+                u8 offset = vm.bytecode[vm.ip + 2];
+                u8 reg    = vm.bytecode[vm.ip + 3];
+                u32 addr = imm + offset;
+                vm.mem[addr] = reg;
+            }break;
+            case op_mov_reg_addreg:{//MOV $0 [$0 + offset]
+                u8 reg1     = vm.bytecode[vm.ip + 1];
+                u8 reg2     = vm.bytecode[vm.ip + 2];
+                u8 offset   = vm.bytecode[vm.ip + 3];
+                u32 addr = vm.registers[reg2] + offset;
+                vm.registers[reg1] = vm.mem[addr];
+            }break;
+            case op_mov_reg_addimm:{
+                u8 reg1     = vm.bytecode[vm.ip + 1];
+                u8 imm     = vm.bytecode[vm.ip + 2];
+                u8 offset   = vm.bytecode[vm.ip + 3];
+                u32 addr = imm + offset;
+                vm.registers[reg1] = vm.mem[addr];
+            }break;
+            default:{
+                printf("UNHANDLED INSTRUCTION %s%s%s\n", BRED, opStr(vm.bytecode[vm.ip]), RESET);
+                printVMLine((vm.ip / 4) + 1);
+                Assert(0);
+            }break;
         }
         vm.ip += 4;
     }
 }
 
+typedef enum{
+    operand_none,
+    operand_reg,
+    operand_imm,
+    operand_addr_reg, //assume all addresses [$0 + 0]
+    operand_addr_imm, //assume all addresses [#0 + 0]
+}operand_type;
+
+typedef struct operand{
+    operand_type type;
+    //could be a register
+    //or an immediate value
+    //or reg/imm + offset
+    int regOrImm;
+    int offset;
+
+}operand;
+
+operand determineOperand(token* tokens, int* nextToken){
+    operand op = {};
+    token t = tokens[*nextToken];
+    switch(t.type){
+
+        case tok_REG:{
+            op.type = operand_reg;
+            op.regOrImm = t.data.integer;
+            (*nextToken)++;
+        }break;
+
+        case tok_num:
+        case tok_octothorpe:{
+            op.type = operand_imm;
+            op.regOrImm = t.data.integer;
+            (*nextToken)++;
+        }break;
+
+        case tok_lbrack:{ //could mean its [$0] OR [#1] OR [$0 + offset] OR [#1 + offset]
+            (*nextToken)++;
+            
+            t = tokens[*nextToken];
+            switch(t.type){
+                case tok_REG:{
+                    op.type = operand_addr_reg;
+                    op.regOrImm = t.data.integer;
+                    (*nextToken)++;
+                }break;
+                case tok_num:
+                case tok_octothorpe:{
+                    op.type = operand_addr_imm;
+                    op.regOrImm = t.data.integer;
+                    (*nextToken)++;
+
+                }break;
+                default:{
+                    vmTokenError(t, "expected register or number after opening bracket");
+                    processingError++;
+                    return op;
+                }break;
+            }
+            t = tokens[*nextToken];
+            op.offset = 0;
+            //check for offset
+            if(t.type == tok_plus){//we have an offset
+                (*nextToken)++;
+                t = tokens[*nextToken];
+                if(t.type == tok_num || t.type == tok_octothorpe){
+                    (*nextToken)++;
+                    op.offset = t.data.integer;
+                    t = tokens[*nextToken];
+                    if(t.type == tok_rbrack){
+                        (*nextToken)++;
+                    }else{
+                        vmTokenError(t, "expected closing bracket after + offset");
+                        processingError++; 
+                        return op;
+                    }
+                    
+                }else{
+                    vmTokenError(t, "expected number after + for addressing operand");
+                    processingError++; 
+                    return op;
+                }
+                
+            }else if(t.type == tok_rbrack){
+                (*nextToken)++;
+            }else{
+                vmTokenError(t, "expected closing bracket after addressed reg/imm");
+                processingError++; 
+                return op;
+            }
+        }break;
+        default:{}break;
+    }
+    return op;
+}
+
 void vmEmitBytecode(token* tokens, int tokenCount){
     vm.bytecodeCount = 0;
-    //TODO: bake integer number (for registers/immediates) INTO the tok_reg/octothorpe token itself
+    
     int i = 0;
     token top = {};
-    token targ1 = {};
-    token tnum1 = {};
-    token targ2 = {};
-    token tnum2 = {};
-
+    operand op1 = {};
+    operand op2 = {};
+    operand op3 = {};
+        
     while(i < tokenCount){
         //ASSUME THIS IS AN OPERATION TOKEN
         if(top.type != tok_none){
-            op_type optype = op_none;
+            op_type optype = op_none; //operator type
 
             // 0 - 255 | 0 - 255 | 0 - 255 | 0 - 255
             // ^^^
             //operation| arg1    | arg2    | arg3
             int startBytecode = vm.bytecodeCount;
+            printf("PARSING LINE: ");
+            printVMLine((vm.bytecodeCount / 4) + 1);
+
             vm.bytecodeCount += 4;
-            if(top.type == tok_MOV){
-                if(targ1.type == tok_REG){
-                    if(targ2.type == tok_REG){
-                        optype = op_mov_reg_reg;
-                    }else if(targ2.type == tok_octothorpe){
-                        optype = op_mov_reg_imm;
-                    }
-                }
+            if(top.type == tok_MOV && op1.type == operand_reg && op2.type == operand_reg && op3.type == operand_none){
+                optype = op_mov_reg_reg;
             }
-            if(top.type == tok_ADD){
-                if(targ1.type == tok_REG){
-                    if(targ2.type == tok_REG){
-                        optype = op_add_reg_reg;
-                    }else if(targ2.type == tok_octothorpe){
-                        optype = op_add_reg_imm;
-                    }
-                }
+            else if(top.type == tok_MOV && op1.type == operand_reg && op2.type == operand_imm && op3.type == operand_none){
+                optype = op_mov_reg_imm;
+            }
+            else if(top.type == tok_ADD && op1.type == operand_reg && op2.type == operand_reg && op3.type == operand_none){
+                optype = op_add_reg_reg;
+            }
+            else if(top.type == tok_ADD && op1.type == operand_reg && op2.type == operand_imm && op3.type == operand_none){
+                optype = op_add_reg_imm;
+            }
+            else if(top.type == tok_MOV && op1.type == operand_addr_reg && op2.type == operand_imm && op3.type == operand_none){
+                optype = op_mov_addreg_imm;
+            }
+            else if(top.type == tok_MOV && op1.type == operand_addr_imm && op2.type == operand_imm && op3.type == operand_none){
+                optype = op_mov_addimm_imm;
+            }
+            else if(top.type == tok_MOV && op1.type == operand_addr_reg && op2.type == operand_reg && op3.type == operand_none){
+                optype = op_mov_addreg_reg;
+            }
+            else if(top.type == tok_MOV && op1.type == operand_addr_imm && op2.type == operand_reg && op3.type == operand_none){
+                optype = op_mov_addimm_reg;
+            }
+            else if(top.type == tok_MOV && op1.type == operand_reg && op2.type == operand_addr_reg && op3.type == operand_none){
+                optype = op_mov_reg_addreg;
+            }
+            else if(top.type == tok_MOV && op1.type == operand_reg && op2.type == operand_addr_imm && op3.type == operand_none){
+                optype = op_mov_reg_addimm;
             }
             //TODO: check if the register number is valid (0 <= reg < MAX_REGISTERS)
             vm.bytecode[startBytecode+0] = optype;
-            vm.bytecode[startBytecode+1] = tnum1.data.integer;//register number
-            if(targ2.type == tok_REG){
-                vm.bytecode[startBytecode+2] = tnum2.data.integer; //register number
-            }else{
-                //0 - 255
-                //u16 = 65536
-                //TODO: check if its larger than a u16
-                vm.bytecode[startBytecode+2] = (tnum2.data.integer >> 8) & 255;
-                vm.bytecode[startBytecode+3] = (tnum2.data.integer) & 255;
+            vm.bytecode[startBytecode+1] = op1.regOrImm;//register number
+            if(op1.type >= operand_addr_reg){
+                vm.bytecode[startBytecode+2] = op1.offset;//offset
+                //TODO: what if there is no second operand? in the case of push/pop
+                vm.bytecode[startBytecode+3] = op2.regOrImm;
+            }else{//otherwise it was a register or immediate
+                if(op2.type == operand_imm){
+                    vm.bytecode[startBytecode+2] = (op2.regOrImm) & 0xFF;
+                    vm.bytecode[startBytecode+3] = (op2.regOrImm >> 8) & 0xFF;
+                }else if(op2.type == operand_reg){
+                    vm.bytecode[startBytecode+2] = op2.regOrImm;
+                }
+                else if(op2.type >= operand_addr_reg){
+                    vm.bytecode[startBytecode+2] = op2.regOrImm;
+                    vm.bytecode[startBytecode+3] = op2.offset;
+                }
             }
-
         }
         if(tokens[i].type == tok_eof)break;
         top = tokens[i++];
 
-        targ1 = tokens[i];
-        if(targ1.type >= tok_MOV){//error, expected arg after initial operator
-            processingError++;
-            printVMLine(top.line);
-            printf("ASM ERROR: EXPECTED ARGS AFTER OPERATOR\n");
-            break;
-        }else{
-            i++;
-            switch(targ1.type){
-                case tok_num        :{
+        //parsing/assembling can be slow because ultimately the runtime will be slower
+        //and the cost will be amortized
+        //if it becomes a problem we can always speed it up later (not really ;^))
 
-                }break;
-                case tok_REG        :{
-                    tnum1 = tokens[i++];
-                }break;
-                case tok_octothorpe :{
-                    tnum1 = tokens[i++];
-                }break;
-            }
+
+        if(tokens[i].type < tok_MOV){
+            op1 = determineOperand(tokens, &i);
+        }else{
+            continue;
         }
 
-        targ2 = tokens[i];
-        if(targ2.type >= tok_MOV){//error, expected arg after initial operator
-            // processingError++;
-            // printVMLine(top.line);
-            // printf("ASM ERROR: EXPECTED ARGS AFTER OPERATOR\n");
-            // break;
-            continue;
+        if(tokens[i].type < tok_MOV){
+            op2 = determineOperand(tokens, &i);
         }else{
-            i++;
-            switch(targ2.type){
-                case tok_num        :{
-                
-                }break;
-                case tok_REG        :{
-                    tnum2 = tokens[i++];
-                    if(tnum2.type != tok_num){
-                    }
-                }break;
-                case tok_octothorpe :{
-                    tnum2 = tokens[i++];
-                    if(tnum2.type != tok_num){
-                    }
-                }break;
-            }
+            continue;
+        }
+
+        if(tokens[i].type < tok_MOV){
+            op3 = determineOperand(tokens, &i);
+        }else{
+            continue;
         }
 
 
     }
 }
 
+void resetGlobalVMState(){
+    resetVM(&vm);
+    vmVarStorageOffset = 0;
+    vmParserLine = 1;
+    tempVMLineCount = 0;
+    vmTokenCount = 0;
+}
+
+void parseEmitRun(char* input){
+    vmInputLines[1] = input;
+    vmParser(input);
+    printTokens(vmTokens, vmTokenCount);
+    vmEmitBytecode(vmTokens, vmTokenCount);
+    runVM();
+
+}
+
+void vmTest_MOV_ADD(){
+    resetGlobalVMState();
+
+    char asminput[2048] = 
+    "MOV r0 #1\n"
+    "MOV r1 #2\n"
+    "ADD r0 r1\n"
+    "ADD r1 r0\n";
+    
+    parseEmitRun(asminput);
+
+    Assert(vm.registers[0] == 3);
+    Assert(vm.registers[1] == 5);
+}
+
+
+void vmTest_MOV_ADDR(){
+    resetGlobalVMState();
+
+    char asminput[2048] = 
+    "MOV r0 #1\n"
+    "MOV [r0] #2\n"
+    "MOV r1 [r0]\n";
+    
+    parseEmitRun(asminput);
+
+    Assert(vm.registers[1] == 2);
+}
 
 int main(){
 
@@ -2486,39 +2724,11 @@ int main(){
     // }
     // printf("%d\n", x);
     // __debugbreak();
-    char asminput[2048] = 
-    "MOV r0 #1\n"
-    "MOV r1 #2\n"
-    "ADD r0 r1\n"
-    "ADD r1 r0\n"
-    // "MOV $0 $1\n" //same thing
-    // "ADD $0 $1\n"
-    // "SUB $2 $3\n"
-    // "DIV $4 $5\n"
-    // "MUL $6 $7\n" // ;^)))
-    // "MOV32 $6 $7\n"
-    // "MOV16 $8 $9\n"
-    // "MOV8 $10 $11\n"
-    // "INC $12\n"
-    // "DEC $13\n"
-    // "EQ  r14 r15\n"
-    // "NE  r16 r17\n"
-    // "LT  r18 r19\n"
-    // "GT  r20 r21\n"
-    // "LTE r22 r23\n"
-    // "GTE $24 r25\n"
-    // "JMP #42\n"
-    // "JEQ #69\n"
-    // "JNE #67\n"
-    ;
-    vmInputLines[1] = asminput;
-    vmParser(asminput);
-    printTokens(vmTokens, vmTokenCount);
-    vmEmitBytecode(vmTokens, vmTokenCount);
-    runVM();
 
-    Assert(vm.registers[0] == 3);
-    Assert(vm.registers[1] == 5);
+    vmTest_MOV_ADD();
+    vmTest_MOV_ADDR();
+
+
     return 0;
 
     #define LOOP 0
@@ -2751,13 +2961,6 @@ int main(){
         LOAD     $5          #52        ;88 \n\
         JMPB     $5                     ;92 \n\
     */
-
-//TODO TO VM:
-//print every parsed line for easier debugging
-//print every generated opcode for every line
-//add direct constant loading to local indices on the stack (for local variables)
-
-
 
 
 /*
