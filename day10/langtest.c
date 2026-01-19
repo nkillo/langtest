@@ -1,12 +1,5 @@
 /*
-    DAY 9 - 1/19/26
-
-    add '_' to valid characters in identifiers
-    pre increment instruction pointer, store a temp (curip), use that temp for accessing bytecode in the VM
-
-    debug printfs to the VM runtime
-    sandboxxed memory accesses in the VM runtime
-
+    DAY 10 PRE COMMIT (THIS IS EXACTLY THE SAME AS DAY 9)
 
 */
 
